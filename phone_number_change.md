@@ -1,2 +1,0 @@
-# PSEC
-Product Security
