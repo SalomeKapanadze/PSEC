@@ -1,0 +1,198 @@
+---conversion volumes ---
+
+select date_trunc ('month', u.DATE_CREATED::date) as registration_month,
+       sum(ras.INVOICE_VALUE_GBP) as total_volume_gbp,
+       count(distinct u.id)
+
+
+from reports.REPORT_ACTION_STEP  ras
+join reports.user_first_successful_actions rufsa on rufsa.user_id = ras.user_id
+join fx.user u on u.id = ras.user_id
+where rufsa.first_successful_cross_ccy_action_time is not null -- to ensure that cst has ccy transfer
+and datediff (day,u.DATE_CREATED,rufsa.first_successful_cross_ccy_action_time) <= 30 -- time from acc registration to conversion
+and u.DATE_CREATED > dateadd ('month', -24,current_timestamp) -- user registered in last year
+group by 1;
+---
+--Conversion Volumes v2
+
+select date_trunc('month', u.DATE_CREATED::date) as                                     registration_month,
+       count(distinct u.id)                                                             users_created,
+       count(distinct(IFF(rufsa.FIRST_SUCCESSFUL_CROSS_CCY_ACTION_TIME is not null, u.id, NULL))) users_converted_30d,
+       round(users_converted_30d / users_created * 100) || '%'                          ratio_converted_created,
+       sum(ras.INVOICE_VALUE_GBP)                as                                     total_volume_gbp,
+       sum(IFF(rufsa.FIRST_SUCCESSFUL_CROSS_CCY_ACTION_TIME is not null, ras.INVOICE_VALUE_GBP,
+               NULL))                                                                   total_volume_gbp_converted_users,
+       round(total_volume_gbp_converted_users / users_converted_30d * 100)              volume_per_converted_user
+from fx.user u
+         left join reports.REPORT_ACTION_STEP ras on u.id = ras.user_id
+    and ras.SOURCE_CURRENCY <> ras.TARGET_CURRENCY -- cross currency volume only
+         left join reports.user_first_successful_actions rufsa on rufsa.user_id = u.id
+    and datediff(day, u.DATE_CREATED, rufsa.first_successful_cross_ccy_action_time) <=
+        30 -- time from acc registration to conversion
+where u.DATE_CREATED > dateadd('month', -24, current_timestamp) -- user registered in 2 last years
+  AND u.DATE_CREATED < DATEADD(day, -30, current_timestamp)     -- we are looking at a 30 day window, so exclude last 30
+group by 1
+order by 1 asc;
+
+---
+-- conversion for cohorts v3---
+
+select
+--        date_trunc('month', u.DATE_CREATED::date) as                              registration_month,
+
+       date_trunc('month', rufsa.first_successful_cross_ccy_action_time::date) as                conversion_month,
+--        product_type,
+       count(distinct u.id)                                                                      users_created,
+--        count(distinct(IFF(rufsa.FIRST_SUCCESSFUL_CROSS_CCY_ACTION_TIME is not null, u.id, NULL))) users_converted,
+       round(users_converted / users_created * 100) || '%'                          ratio_converted_created,
+       sum(ras.INVOICE_VALUE_GBP)                as                                     total_volume_gbp,
+       sum(IFF(rufsa.FIRST_SUCCESSFUL_CROSS_CCY_ACTION_TIME is not null, ras.INVOICE_VALUE_GBP,
+               NULL))                                                                   total_volume_gbp_converted_users
+--        round(total_volume_gbp_converted_users / users_converted * 100)              volume_per_converted_user
+from fx.user u
+         left join reports.REPORT_ACTION_STEP ras on u.id = ras.user_id
+    and ras.SOURCE_CURRENCY <> ras.TARGET_CURRENCY -- cross currency volume only
+         left join reports.user_first_successful_actions rufsa on rufsa.user_id = u.id
+--     and datediff(day, u.DATE_CREATED, rufsa.first_successful_cross_ccy_action_time) <=
+--         30 -- time from acc registration to conversion
+where u.DATE_CREATED between '2020-12-01'  and '2020-12-31'-- user registered after
+--   AND u.DATE_CREATED < DATEADD(day, -30, current_timestamp)     -- we are looking at a 30 day window, so exclude last 30
+group by 1,2
+order by 1 asc;
+
+-----
+
+select date_trunc('month', u.DATE_CREATED::date) as                                     registration_month,
+       count(distinct u.id)                                                             users_created,
+       count(distinct(IFF(rufsa.FIRST_SUCCESSFUL_CROSS_CCY_ACTION_TIME is not null, u.id, NULL))) users_converted_30d,
+       round(users_converted_30d / users_created * 100) || '%'                          ratio_converted_created,
+       sum(ras.INVOICE_VALUE_GBP)                as                                     total_volume_gbp,
+       sum(IFF(rufsa.FIRST_SUCCESSFUL_CROSS_CCY_ACTION_TIME is not null, ras.INVOICE_VALUE_GBP,
+       NULL))                                                                   total_volume_gbp_converted_users,
+       round(total_volume_gbp_converted_users / users_converted_30d * 100)              volume_per_converted_user,
+       sum(case when datediff(day,u.date_created,ras.ACTION_COMPLETION_TIME) <= 30 then ras.INVOICE_VALUE_GBP end) volume_30d,
+       round(volume_30d / users_converted_30d * 100)                                     volume_per_converted_user_30d
+from fx.user u
+left join reports.REPORT_ACTION_STEP ras on u.id = ras.user_id and ras.SOURCE_CURRENCY <> ras.TARGET_CURRENCY -- cross currency volume only
+left join reports.user_first_successful_actions rufsa on rufsa.user_id = u.id
+and datediff(day, u.DATE_CREATED, rufsa.first_successful_cross_ccy_action_time) <= 30 -- time from acc registration to conversion
+where u.DATE_CREATED > dateadd('month', -12, current_timestamp) -- user registered in 2 last years
+AND u.DATE_CREATED < DATEADD(day, -30, current_timestamp)     -- we are looking at a 30 day window, so exclude last 30
+group by 1
+order by 1 asc;
+
+
+----
+
+
+select date_trunc (month,u.date_created) signup_month,
+--        date_trunc (month,ras.ACTION_COMPLETION_TIME) trx_month,
+       date_trunc(month,ras.ACTION_COMPLETION_TIME) action_completion_month,
+       count (distinct u.id) users,
+       sum (ras.INVOICE_VALUE_GBP) monthly_volume,
+       monthly_volume/users monthly_volume_per_transacted_user
+from fx.user u
+join reports.REPORT_ACTION_STEP ras on u.id = ras.user_id and ras.SOURCE_CURRENCY <> ras.TARGET_CURRENCY
+where u.DATE_CREATED between '2020-01-01'  and '2021-02-01'
+and FLAG_FOR_AGGREGATIONS = 1
+-- and signup_month = trx_month
+group by 1
+order by 1 asc;
+
+
+---
+with first_ccy_transfer as (
+    select
+           ras.ACTION_COMPLETION_TIME,
+           ras.request_id,
+           row_number() over ( partition by ras.user_id order by ras.ACTION_COMPLETION_TIME asc ) row_number,
+           user_id,
+           invoice_value_gbp
+
+    from reports.report_action_step ras
+    where flag_for_aggregations = 1
+      and source_currency <> target_currency
+    order by USER_ID
+)
+
+select date_trunc('month', u.DATE_CREATED) signup_month,
+       date_trunc('month', first_ccy_transfer.ACTION_COMPLETION_TIME) conversion_month,
+       count(distinct first_ccy_transfer.USER_ID),
+       sum (first_ccy_transfer.INVOICE_VALUE_GBP) as first_converted_volume
+
+from fx.user u
+join first_ccy_transfer on first_ccy_transfer.user_id = u.ID
+where first_ccy_transfer.row_number = 1 -- first completed transfer
+and u.date_created between '2020-01-01' and '2021-01-01'
+-- and datediff ( day,u.DATE_CREATED,first_ccy_transfer.ACTION_COMPLETION_TIME) <=30
+group by 1, 2
+order by 1
+;
+
+
+--------------------
+
+WITH base_table as (
+select u.id,
+       date_trunc(month, u.DATE_CREATED) user_signup_month,
+       CASE
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 0 AND 30 THEN 'Month 1'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 31 AND 60 THEN 'Month 2'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 61 AND 90 THEN 'Month 3'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 91 AND 120 THEN 'Month 4'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 121 AND 150 THEN 'Month 5'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 151 AND 180 THEN 'Month 6'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 181 AND 210 THEN 'Month 7'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 211 AND 240 THEN 'Month 8'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 241 AND 270 THEN 'Month 9'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 271 AND 300 THEN 'Month 10'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 301 AND 330 THEN 'Month 11'
+           WHEN DATEDIFF(day, u.DATE_CREATED, ras.ACTION_COMPLETION_TIME) BETWEEN 331 AND 360 THEN 'Month 12'
+           ELSE 'More' END as buckets,
+       ras.INVOICE_VALUE_GBP,
+       ras.ACTION_ID
+from FX.USER u
+         LEFT JOIN REPORTS.REPORT_ACTION_STEP ras On ras.USER_ID = u.id
+
+where ras.FLAG_FOR_AGGREGATIONS = 1
+and ras.SOURCE_CURRENCY != ras.TARGET_CURRENCY
+and u.date_created between '2020-01-01' and '2021-03-01')
+
+select user_signup_month,
+       count(distinct id) converted_users,
+       SUM(IFF(buckets = 'Month 1', INVOICE_VALUE_GBP, NULL)) month1_value,
+       SUM(IFF(buckets = 'Month 2', INVOICE_VALUE_GBP, NULL)) month2_value,
+       SUM(IFF(buckets = 'Month 3', INVOICE_VALUE_GBP, NULL)) month3_value,
+       SUM(IFF(buckets = 'Month 4', INVOICE_VALUE_GBP, NULL)) month4_value,
+       SUM(IFF(buckets = 'Month 5', INVOICE_VALUE_GBP, NULL)) month5_value,
+       SUM(IFF(buckets = 'Month 6', INVOICE_VALUE_GBP, NULL)) month6_value,
+       SUM(IFF(buckets = 'Month 7', INVOICE_VALUE_GBP, NULL)) month7_value,
+       SUM(IFF(buckets = 'Month 8', INVOICE_VALUE_GBP, NULL)) month8_value,
+       SUM(IFF(buckets = 'Month 9', INVOICE_VALUE_GBP, NULL)) month9_value,
+       SUM(IFF(buckets = 'Month 10', INVOICE_VALUE_GBP, NULL)) month10_value,
+       SUM(IFF(buckets = 'Month 11', INVOICE_VALUE_GBP, NULL)) month11_value,
+       SUM(IFF(buckets = 'Month 12', INVOICE_VALUE_GBP, NULL)) month12_value
+
+from base_table
+group by 1
+order by 1 asc;
+
+select count(u.id), date_trunc(month,u.date_created) from fx.user u where DATE_CREATED between '2020-01-01' and '2021-03-01'
+group by 2
+
+;
+
+
+---2fa impact on ccy volumes---
+
+select
+       date_trunc (month,ras.ACTION_COMPLETION_TIME) trx_month,
+       count (distinct u.id) users,
+       sum (ras.INVOICE_VALUE_GBP) monthly_volume,
+       monthly_volume/users monthly_volume_per_transacted_user
+from fx.user u
+join reports.REPORT_ACTION_STEP ras on u.id = ras.user_id and ras.SOURCE_CURRENCY <> ras.TARGET_CURRENCY
+where trx_month between '2020-01-01'  and '2021-03-01'
+and FLAG_FOR_AGGREGATIONS = 1
+group by 1
+order by 1 asc;
