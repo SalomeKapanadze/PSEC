@@ -1,0 +1,200 @@
+call sandbox_db.sandbox_all.drop_table ('dup_accounts');
+create temporary table if not exists sandbox_db.sandbox_all.dup_accounts AS
+
+with base_table as (
+                 SELECT u.DATE_CREATED signup_date,
+                        messages.user_id user_id,
+                        u.ACTIVE,
+                        messages.date_sent dup_account_created_date
+
+                 FROM NOTIFICATIONS.MESSAGES messages
+                 join fx.user u on u.id = messages.USER_ID
+                 WHERE NOTIFICATION_ID in ( 'duplicate-account-options',  'duplicate-account-options-with-change-emails')
+                 AND NOT EXISTS (SELECT 1 FROM reports.lookup_transferwisers_user_ids ltui
+                                  WHERE u.id = ltui.transferwiser_user_id)
+
+),
+
+     succ_actions as (
+         select user_id,
+                ACTION_COMPLETION_TIME,
+                ACTION_CREATION_TIME,
+                INVOICE_VALUE_GBP
+
+         from reports.REPORT_ACTION_STEP ras
+         where FLAG_FOR_AGGREGATIONS = 1
+
+     ),
+
+     ltv as (
+       select USER_ID,
+              LTV_12M ltv
+
+       from reports.LOOKUP_CONVERTED_USERS_MERGED
+)
+
+
+    select b.user_id user_id,
+           b.active,
+           b.signup_date,
+           b.dup_account_created_date,
+           case when succ_actions.USER_ID is not null then true else false end has_succ_action,
+           succ_actions.INVOICE_VALUE_GBP volume_gbp,
+           max(succ_actions.ACTION_COMPLETION_TIME) last_action_completion_date,
+           succ_actions.ACTION_CREATION_TIME action_creation_date,
+           ltv.ltv
+
+    from base_table b
+    left join succ_actions on succ_actions.USER_ID = b.user_id
+    left join ltv on ltv.USER_ID = b.user_id
+    group by 1,2,3,4,5,6,8,9
+;
+
+
+select
+       count(distinct user_id) ,
+
+--         active,
+--         signup_date,
+--         dup_account_created_date  dup_created_date,
+--           date_trunc (month, dup_account_created_date) dup_created_month,
+--           date_trunc(month,last_action_completion_date) trx_month
+
+--        has_succ_action,
+--        SUM(IFF(has_succ_action = TRUE, volume_gbp, NULL)) TOTAL_LIFETIME_VOLUME
+--        avg(ltv)
+          case when dup_accounts.last_action_completion_date > dup_account_created_date then true else false end active_after_dup
+
+from sandbox_db.sandbox_all.dup_accounts
+where dup_account_created_date >= dateadd (day,-90, current_timestamp)
+
+group by 2
+limit 10;
+
+
+
+
+
+select * from reports.lookup_converted_users_merged  where USER_ID =
+'21352963';
+
+
+select ltv.USER_ID,
+       case when ltv.NEW_MODEL_LTV_12M_LIVE is not null then ltv.NEW_MODEL_LTV_12M_LIVE
+                                                        else ltv2.COHORT_LTV end LTV_12M
+       from reports.marketing_user_values ltv
+       join reports.lookup_converted_users_merged ltv2 on ltv2.USER_ID = ltv.USER_ID
+where ltv.USER_ID =
+'21352963'
+;
+
+
+
+
+select
+       avg(ltv_12m),
+       case when dups.user_id is not null then true else false end dup_account
+
+from reports.lookup_converted_users_merged lookup
+left join sandbox_db.sandbox_all.dup_accounts dups on dups.user_id = lookup.USER_ID
+group by 2
+;
+
+
+-- email verification avg LTVs
+select ev.VERIFIED,
+       round(avg(lookup.LTV_12M) ,2)as avg_ltv
+
+
+ from identity.EMAIL_VERIFICATION ev
+ join reports.LOOKUP_CONVERTED_USERS_MERGED lookup on lookup.USER_ID = ev.USER_ID
+ where REGISTRATION_TIMESTAMP between '2020-01-01' and '2021-03-01'
+ group by 1;
+
+
+select * from identity.EMAIL_VERIFICATION limit 10
+
+
+
+---------------------
+
+
+call sandbox_db.sandbox_all.drop_table ('dup_collisions');
+create temporary table if not exists sandbox_db.sandbox_all.dup_collisions  AS
+
+
+SELECT
+
+-- count (distinct up.user_id) as count_users
+
+DISTINCT
+up.user_id as user_id
+,up.first_name  as first_name
+,up.last_name as last_name
+,up.date_of_birth as date_of_birth
+,up.date_created as account_created_date
+,b.user_active as user_active
+
+--------------dup-overrides and dup-deactivates--------------
+,max(case when utf.tag_name = 'dup-override' then 'yes'
+end ) as dup_override   --- to see customers with 'dup-override' tag on their profile
+,max(case when utf.tag_name = 'dup-deactivated' then 'yes'
+end ) as dup_deactivated
+
+-----------bank integrated accounts------------------
+,max (case when utf.tag_name in ('rest-api-client-id-monzo', 'rest-api-client-id-bunq','rest-api-client-id-lhv',
+'rest-api-client-id-activo', 'rest-api-client-id-neon', 'rest-api-client-id-expobank', ' rest-api-client-id-stanfordcredit',
+'rest-api-client-id-novo', 'rest-api-client-id-cib', 'rest-api-client-id-up', 'rest-api-client-id-eqbank', ' rest-api-client-id-nolo',
+'rest-api-client-id-northone', 'rest-api-client-id-rho', ' rest-api-client-id-n26', 'rest-api-client-id-9bd21048-d6b2-4abd-a7e2-fd0d1413e080') then 'yes'
+end ) as bank_partner_account  --- to check if customer has bank partner account with us or not
+
+-----------referrals------------------------
+,case when rv.guest_id is null then false
+else true
+end as is_referred_guest
+
+
+FROM fx_clear.user_profile up
+
+
+LEFT JOIN reports.user_tag_facts utf on utf.user_id = up.user_id
+LEFT JOIN virality.referral rv on rv.guest_id = up.user_id
+
+JOIN  ----to filter users with the same name, last name or date of birth---
+
+(SELECT
+up1.first_name as first_name
+,up1.last_name as last_name
+,up1.date_of_birth as date_of_birth
+,u.active as user_active
+,count(*)
+
+FROM fx_clear.user_profile up1
+JOIN fx_clear.user u ON u.id = up1.user_id
+JOIN reports.report_user_characteristics uc ON uc.id_user = up1.user_id
+
+
+WHERE
+
+uc.id_user_profile_business IS NULL -- to exclude business users
+AND up1.user_id NOT IN (SELECT transferwiser_user_id from reports.lookup_transferwisers_user_ids) -- exclude TW employees
+AND up1.first_name NOT LIKE '%ABC' -- to remove names such as 'ABC'
+AND NOT REGEXP_LIKE (up1.first_name, '%[^0-9.-]%') -- to remove numeric values
+AND up1.first_name NOT LIKE '<svg/onload=alert(1)>' -- to remove this kind of weird names
+AND length (up1.first_name) > 1    -- to remove names with length less than 1 letter
+GROUP BY  1,2,3,4
+HAVING count (*)>1  -- to count users with the same personal details (last name, first name, dob)
+) b
+
+
+ON  up.first_name = b.first_name  -- users have the same first name
+AND up.last_name = b.last_name    -- users have the same last name
+AND up.date_of_birth = b.date_of_birth      -- users have the same date of birth
+AND up.first_name IS NOT NULL
+AND up.last_name IS NOT NULL
+
+
+
+GROUP BY 1, 2,3,4,5,6,10
+ORDER BY 2,3 DESC
+;
