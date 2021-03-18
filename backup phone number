@@ -1,0 +1,145 @@
+----notifications for BPN - Web ---
+
+
+call sandbox_db.sandbox_all.drop_table ('bpn_campaign_web');
+create temporary table if not exists sandbox_db.sandbox_all.bpn_campaign_web
+
+as
+
+select distinct up.user_id as user_id
+--                 u.language as lang
+--                 row_number() over (order by up.user_id ASC) as row_number
+
+from fx.user_profile up
+ inner join fx.user u on u.id = up.user_id
+            and u.active = 1 -- exclude deactivated users
+--  inner join reports.REPORT_ACTION_STEP ras on ras.user_id = up.user_id
+ inner join kafka.SECURITY_AUDITLOG_EVENT sae on sae.USER_ID = u.ID
+ inner join fx.USER_SECOND_FACTOR_AUTH_METHOD usfa on usfa.USER_ID = u.ID -- cst has 2fa
+
+
+where
+      1=1
+  and up.class = 'com.transferwise.fx.user.PersonalUserProfile'
+  and sae.CREATED_AT >= dateadd('month', -6, current_timestamp)
+  and sae.EVENT_TYPE = 'LoggedIn' -- logged in successfully in last 6 months
+--   and sae.PLATFORM in ('UNKNOWN','WEB', 'MOBILE_WEB', 'unknown', 'web', 'mobile_web') --logins in web/mobile web
+  and sae.PLATFORM in ('iOS', 'ios-app', 'ANDROID', 'android-app') -- logins in mobiles
+
+
+  and not exists ( select 1 from fx.tag_links tl
+                   where tl.tag_ref = u.id and tl.type = 'user' and tl.tag_id in (7206,7771,111694) )-- exclude fraudulent users, problematic KYC and problematic EDD
+
+  and not exists (select 1 from notifications.user_preferences
+                  where u.id = user_preferences.user_id and parse_json(USER_PREFERENCES.CHANNELS_PREFERENCES):promotional.email = 'false') -- specifies user notification preference
+
+  and not exists (select user_id from kafka.SECURITY_AUDITLOG_EVENT auditlog
+                  where u.id = auditlog.user_id and EVENT_TYPE = 'PhoneNumberAdded')
+
+  AND NOT EXISTS (SELECT 1 FROM NOTIFICATIONS.MESSAGES m join NOTIFICATIONS.NOTIFICATIONS n on n.ID = m.NOTIFICATION_ID
+       where m.USER_ID = u.ID
+       and n.CATEGORY in ('SURVEYS','PROMOTIONAL','CAMPAIGNS')
+       and m.DATE_SENT > DATEADD('day', -15, CURRENT_DATE))
+
+--   and u.LANGUAGE != 'JA'
+
+-- group by 1
+;
+
+select * from sandbox_db.sandbox_all.bpn_campaign_web limit 50000;
+
+-----
+
+--bpn-campaign--
+
+with bpn_campaign_users
+as ( select user_id,
+            date_sent,
+            id
+
+            from notifications.messages
+            where channel in ('EMAIL', 'INBOX')
+            and notification_id = 'backup-phone-number-upsell-campaign'
+            and status = 'SENT'),
+
+     bpn_campaign_users_opened as (
+         select bpn_campaign_users.user_id,
+                device_type,
+                date_opened
+
+         from notifications.opens opens
+         join bpn_campaign_users on opens.message_id = bpn_campaign_users.id
+         ),
+
+     bpn_users as (
+          select auditlog.user_id,
+                 auditlog.created_at,
+                 auditlog.platform
+
+              from kafka.SECURITY_AUDITLOG_EVENT auditlog
+              join bpn_campaign_users on bpn_campaign_users.user_id = auditlog.user_id
+              where  EVENT_TYPE = 'PhoneNumberAdded'
+              and auditlog.created_at > bpn_campaign_users.date_sent -- bpn added after email was sent
+
+         )
+
+     select
+--             bpn_users.platform,
+            date_trunc('week', bpn_campaign_users.DATE_SENT) as notification_sent_week,
+            count (distinct bpn_campaign_users.user_id) total_campaign_users,
+            count (distinct (iff ( bpn_campaign_users_opened.user_id is not null, bpn_campaign_users.user_id, null))) users_opened_notif,
+            count (distinct (iff( bpn_users.user_id is not null, bpn_campaign_users.user_id, null  )) ) bpn_converted_users,
+            round (users_opened_notif/total_campaign_users * 100) || '%' ratio_opened_received,
+            round (bpn_converted_users/total_campaign_users * 100) || '%' ratio_bpn_converted_users
+
+     from bpn_campaign_users
+     left join bpn_campaign_users_opened on bpn_campaign_users_opened.user_id = bpn_campaign_users.user_id
+     left join bpn_users on bpn_users.user_id = bpn_campaign_users.user_id
+     group by 1
+;
+
+---pnc-bpn-users---
+with bpn_pnc_users
+as ( select user_id,
+            date_sent,
+            id
+
+            from notifications.messages
+            where channel = 'EMAIL'
+            and notification_id = 'confirm-phone-number-change-backup-upsell'
+            and status = 'SENT'),
+
+     bpn_campaign_users_opened as (
+         select bpn_pnc_users.user_id,
+                device_type,
+                date_opened
+
+         from notifications.opens opens
+         join bpn_pnc_users on opens.message_id = bpn_pnc_users.id
+         ),
+
+     bpn_users as (
+          select auditlog.user_id,
+                 auditlog.created_at,
+                 auditlog.platform
+
+              from kafka.SECURITY_AUDITLOG_EVENT auditlog
+              join bpn_pnc_users on bpn_pnc_users.user_id = auditlog.user_id
+              where  EVENT_TYPE = 'PhoneNumberAdded'
+              and auditlog.created_at > bpn_pnc_users.date_sent -- bpn added after email was sent
+
+         )
+
+     select
+--             bpn_users.platform,
+            date_trunc ('week', bpn_pnc_users.date_sent)  as pnc_changed_week,
+            count (distinct bpn_pnc_users.user_id) total_campaign_users,
+            count (distinct (iff ( bpn_campaign_users_opened.user_id is not null, bpn_pnc_users.user_id, null))) users_opened_notif,
+            count (distinct (iff( bpn_users.user_id is not null, bpn_pnc_users.user_id, null  )) ) bpn_converted_users,
+            round (users_opened_notif/total_campaign_users * 100) || '%' ratio_opened_received,
+            round (bpn_converted_users/total_campaign_users * 100) || '%' ratio_bpn_converted_users
+
+     from bpn_pnc_users
+     left join bpn_campaign_users_opened on bpn_campaign_users_opened.user_id = bpn_pnc_users.user_id
+     left join bpn_users on bpn_users.user_id = bpn_pnc_users.user_id
+     group by 1
