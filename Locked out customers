@@ -1,0 +1,377 @@
+---LOCKED OUT CUSTOMERS BY GROUPS---RESEARCH-----
+
+
+call sandbox_db.sandbox_all.drop_table ('locked_out_customers');
+create temporary table if not exists sandbox_db.sandbox_all.locked_out_customers
+
+as
+
+with eligible_users as (
+    select distinct u.id user_id,
+                    u.DATE_CREATED registration_date,
+                    u.active,
+                    ras.ACTION_CREATION_TIME action_creation_date,
+--                     about,
+                    tickets.ABOUT about_field,
+                    tickets.CREATED_AT contact_created_date
+--                     tickets.FLAG_IS_USER
+
+    from fx.user u
+             left join fx.user_profile up on u.id = up.user_id
+             left join reports.REPORT_ACTION_STEP ras on ras.USER_ID = u.id
+             join reports.ZENDESK_TICKETS tickets on tickets.USER_ID = u.id
+    where 1 = 1
+--       and up.class = 'com.transferwise.fx.user.PersonalUserProfile'
+
+      and not exists( select 1
+                     from fx.tag_links tl
+                     where tl.tag_ref = u.id
+                       and tl.type = 'user'
+                       and tl.tag_id in (7206, 7771, 111694))-- exclude fraudulent users, problematic KYC and problematic EDD
+
+      and not exists( select 1
+                     from notifications.user_preferences
+                     where u.id = user_preferences.user_id
+                       and parse_json(USER_PREFERENCES.CHANNELS_PREFERENCES):promotional.email =
+                           'false')                          -- specifies user notification preference
+
+      and not exists ( select 1
+                     from notifications.MESSAGES
+                     where u.id = MESSAGES.USER_ID
+                     and NOTIFICATION_ID = 'active-customers-interview')   --- exclude users that were previously interviewed
+
+      and u.DATE_CREATED > dateadd ('month', - 36, current_timestamp)
+
+),
+
+     contacted_about_pnc as
+                        (
+                             select eligible_users.user_id user_id
+--                                    case when eligible_users.action_creation_date > eligible_users.contact_created_date then 'active' else 'non-active' end  active_users
+
+                             from eligible_users
+
+                             where eligible_users.about_field in ('Logging In,2FA,Phone Number Change','Logging In,2FA,2FA Phone number change' )
+                             and eligible_users.contact_created_date > dateadd ('day', -180, current_timestamp) -- contacted in last 6 months
+
+
+    ),
+
+    contacted_about_email_typo as
+                        (
+                            select eligible_users.user_id user_id
+--                                    case when eligible_users.action_creation_date > eligible_users.contact_created_date then 'active' else 'non-active' end  active_users
+
+                            from eligible_users
+                                   where eligible_users.about_field in ('Logging In,Email - Login,New Email', 'Logging In,Email - Login,Email Typo')
+                                   and eligible_users.contact_created_date > dateadd ('day', -180, current_timestamp) -- contacted in last 6 months
+
+
+    ),
+
+
+   contacted_reset_password as
+         (select eligible_users.user_id user_id
+--                  case when eligible_users.action_creation_date > eligible_users.contact_created_date then 'active'
+--                      else 'non-active' end active_users
+            from eligible_users
+            where eligible_users.about_field in ('Security,Login,Password', 'Logging In,Password - Login,Password Reset Issue',
+                                         'Logging In,Password - Login,Forgot Password/New Phone Number')
+            and eligible_users.contact_created_date >
+                dateadd('day', -180, current_timestamp) -- contacted in last 6 months
+
+         ),
+
+     contacted_reactivation_request as
+         ( select eligible_users.user_id user_id
+--                  case when eligible_users.action_creation_date > eligible_users.contact_created_date then 'active'
+--                      else 'non-active' end active_users
+          from eligible_users
+          where eligible_users.about_field in ('Logging In,Reactivation Request,Duplicate Account - Locked Out Customer', 'Logging In,Reactivation Request,Appeals',
+                                        'Logging In,Reactivation Request,Non-Compliance Appeals', 'Logging In,Reactivation Request,Appeals')
+            and eligible_users.contact_created_date >
+                dateadd('day', -180, current_timestamp) -- contacted in last 6 months
+
+     ),
+
+     contacted_2fa_issues as
+         (select eligible_users.user_id    user_id
+--                  case
+--                      when eligible_users.action_creation_date > eligible_users.contact_created_date then 'active'
+--                      else 'non-active' end active_users
+          from eligible_users
+          where eligible_users.about_field in ('Logging In,2FA,SMS Deliver Issue', 'Logging In,2FA,Push Notification Error',
+                                         'Logging In,2FA,Lost/New Device', 'Logging In,2FA,Voice Call Error')
+            and eligible_users.contact_created_date >
+                dateadd('day', -180, current_timestamp)
+         )
+
+
+
+     select
+            eligible_users.registration_date as registration_date,
+            eligible_users.active as active,
+            action_creation_date,
+            --pnc users
+            contacted_about_pnc.user_id as pnc_users,
+--             contacted_about_pnc.active_users as active_pnc_users,
+            --reset password users
+            contacted_reset_password.user_id as reset_pssw_users,
+--             contacted_reset_password.active_users as active_reset_pssw_users,
+            --reactivation requested users
+            contacted_reactivation_request.user_id as reactivation_request_users,
+--             contacted_reactivation_request.active_users as active_reactivation_request_users,
+            --email typo users
+            contacted_about_email_typo.user_id as email_typo_users,
+--             contacted_about_email_typo.active_users as active_email_typo_users,
+            --2fa issues users
+            contacted_2fa_issues.user_id as twofa_issues_users
+--             contacted_2fa_issues.active_users as active_twofa_issues_users
+--
+--             IFF (contacted_about_pnc.user_id is not null and contacted_about_pnc.active_users = 'active',eligible_users.user_id, null) contacted_about_pnc_active,
+--             IFF (contacted_about_pnc.user_id is not null and contacted_about_pnc.active_users = 'non-active', eligible_users.user_id, null) contacted_about_pnc_non_active,
+--             IFF (contacted_2fa_issues.user_id is not null and contacted_2fa_issues.active_users ='active', eligible_users.user_id, null) contacted_2fa_issues_active,
+--             IFF (contacted_2fa_issues.user_id is not null and contacted_2fa_issues.active_users = 'non-active', eligible_users.user_id, null) contacted_2fa_issues_non_active,
+--             IFF (contacted_about_email_typo.user_id is not null and contacted_about_email_typo.active_users = 'active', eligible_users.user_id, null) contacted_email_typo_active,
+--             IFF (contacted_about_email_typo.user_id is not null and contacted_about_email_typo.active_users = 'non-active', eligible_users.user_id, null) contacted_email_typo_non_active,
+--             IFF (contacted_reactivation_request.user_id is not null and contacted_reactivation_request.active_users = 'active', eligible_users.user_id, null) contacted_reactivation_request_active,
+--             IFF (contacted_reactivation_request.user_id is not null and contacted_reactivation_request.active_users = 'non-active', eligible_users.user_id, null) contacted_reactivation_request_non_active,
+--             IFF (contacted_reset_password.user_id is not null and contacted_reactivation_request.active_users = 'active', eligible_users.user_id, null) contacted_reet_password_active,
+--             IFF (contacted_reset_password.user_id is not null and contacted_reactivation_request.active_users = 'non-active', eligible_users.user_id, null) contacted_reet_password_non_active
+
+
+     from eligible_users
+
+     left join contacted_about_pnc on contacted_about_pnc.user_id = eligible_users.user_id
+     left join contacted_2fa_issues on contacted_2fa_issues.user_id = eligible_users.user_id
+     left join contacted_about_email_typo on contacted_about_email_typo.user_id = eligible_users.user_id
+     left join contacted_reactivation_request on contacted_reactivation_request.user_id = eligible_users.user_id
+     left join contacted_reset_password on contacted_reset_password.user_id = eligible_users.user_id
+
+;
+
+
+select distinct reset_pssw_users, registration_date, active,action_creation_date
+
+ from sandbox_db.sandbox_all.locked_out_customers
+ where locked_out_customers.reset_pssw_users is not null
+limit 100
+
+
+;
+
+------locked out customers by about fields vol 2 ----
+
+
+call sandbox_db.sandbox_all.drop_table ('locked_out_customers');
+create temporary table if not exists sandbox_db.sandbox_all.locked_out_customers
+
+as
+
+    select distinct u.id user_id,
+                    up.id profile_id,
+                    u.DATE_CREATED registration_date,
+                    u.active,
+                    ras.action_creation_time action_creation_date,
+                    tickets.ABOUT about_field,
+                    tickets.CREATED_AT contact_created_date,
+                    case when tickets.about in ('Logging In,2FA,Phone Number Change','Logging In,2FA,2FA Phone number change' ) then true else false end pnc_contact,
+                    case when tickets.about in ('Logging In,Email - Login,New Email', 'Logging In,Email - Login,Email Typo') then true else false end email_contact,
+                    case when tickets.about in ('Security,Login,Password', 'Logging In,Password - Login,Password Reset Issue',
+                                         'Logging In,Password - Login,Forgot Password/New Phone Number') then true else false end reset_psswd_contact,
+                    case when tickets.about in ('Logging In,Reactivation Request,Duplicate Account - Locked Out Customer', 'Logging In,Reactivation Request,Appeals',
+                                        'Logging In,Reactivation Request,Non-Compliance Appeals', 'Logging In,Reactivation Request,Appeals') then true else false end reactivation_request_contact,
+                    case when tickets.about in ('Logging In,2FA,SMS Deliver Issue', 'Logging In,2FA,Push Notification Error',
+                                         'Logging In,2FA,Lost/New Device', 'Logging In,2FA,Voice Call Error') then true else false end twofa_issues_contact
+
+
+    from reports.ZENDESK_TICKETS  tickets
+             inner join fx.user u on tickets.USER_ID = u.id
+             inner join fx.user_profile up on up.USER_ID = tickets.USER_ID
+             left join (select USER_ID, max(ACTION_CREATION_TIME) action_creation_time
+                        from reports.REPORT_ACTION_STEP
+                        group by 1
+                         ) ras on ras.USER_ID = tickets.USER_ID
+
+
+    where 1 = 1
+
+       and u.LANGUAGE = 'EN' -- English speakers only
+       and up.CLASS = 'com.transferwise.fx.user.PersonalUserProfile'
+       and up.FIRST_NAME is not null
+       and up.LAST_NAME is not null
+
+      and not exists( select tag_ref
+                     from fx.tag_links tl
+                     where tl.tag_ref = tickets.user_id
+                       and tl.type = 'user'
+                       and tl.tag_id in (7206, 7771, 111694))-- exclude fraudulent users, problematic KYC and problematic EDD
+
+      and not exists( select user_id
+                     from notifications.user_preferences
+                     where tickets.user_id = user_preferences.user_id
+                       and parse_json (USER_PREFERENCES.CHANNELS_PREFERENCES):promotional.email =
+                           'false')                          -- specifies user notification preference
+
+      AND NOT EXISTS (SELECT 1 FROM reports.lookup_user_surveyed lus
+      WHERE u.id = lus.user_id AND last_survey_date > DATEADD('day', -15, CURRENT_DATE))
+    -- Excludes customers surveyed in the past 2 weeks outside of notifiation service
+
+       AND NOT EXISTS (SELECT 1 FROM NOTIFICATIONS.MESSAGES m join NOTIFICATIONS.NOTIFICATIONS n on n.ID = m.NOTIFICATION_ID
+       where m.USER_ID = u.ID
+       and n.CATEGORY in ('SURVEYS','PROMOTIONAL','CAMPAIGNS')
+       and m.DATE_SENT > DATEADD('day', -15, CURRENT_DATE))      -- Excludes customers surveyed using notification service in the past 2 weeks
+
+
+
+      and not exists ( select user_id
+                     from notifications.MESSAGES
+                     where tickets.user_id = MESSAGES.USER_ID
+                     and NOTIFICATION_ID = 'active-customers-interview')   --- exclude users that were previously interviewed
+
+      and tickets.created_at > dateadd ('day', -180, current_timestamp )
+      and about_field in ('Logging In,2FA,Phone Number Change','Logging In,2FA,2FA Phone number change',
+                          'Logging In,Email - Login,New Email', 'Logging In,Email - Login,Email Typo',
+                         'Security,Login,Password', 'Logging In,Password - Login,Password Reset Issue',
+                                         'Logging In,Password - Login,Forgot Password/New Phone Number',
+                         'Logging In,Reactivation Request,Duplicate Account - Locked Out Customer', 'Logging In,Reactivation Request,Appeals',
+                                        'Logging In,Reactivation Request,Non-Compliance Appeals', 'Logging In,Reactivation Request,Appeals',
+                         'Logging In,2FA,SMS Deliver Issue', 'Logging In,2FA,Push Notification Error',
+                                         'Logging In,2FA,Lost/New Device', 'Logging In,2FA,Voice Call Error'
+                         )
+
+      group by 1,2,3,4,5,6,7
+
+;
+
+
+
+-------------------
+
+---PNC USERS---
+
+select distinct profile_id
+
+from sandbox_db.sandbox_all.locked_out_customers
+where pnc_contact = true
+and action_creation_date > contact_created_date
+and active = true;
+
+
+---
+select distinct profile_id
+from sandbox_db.sandbox_all.locked_out_customers
+where pnc_contact = true
+and active = true
+and (action_creation_date < contact_created_date or action_creation_date is null)
+;
+
+
+--Email typo users ---
+
+select distinct profile_id
+
+from sandbox_db.sandbox_all.locked_out_customers
+where email_contact = true
+and action_creation_date > contact_created_date
+and active = true;
+
+---
+
+
+select distinct profile_id
+
+from sandbox_db.sandbox_all.locked_out_customers
+where email_contact = true
+and active = true
+and (action_creation_date < contact_created_date or action_creation_date is null)
+;
+
+
+--
+--Reset password ---
+
+
+select distinct profile_id
+
+from sandbox_db.sandbox_all.locked_out_customers
+where reset_psswd_contact = true
+and action_creation_date > contact_created_date
+and active = true;
+
+---
+
+select distinct profile_id
+from sandbox_db.sandbox_all.locked_out_customers
+where reset_psswd_contact = true
+and active = true
+and (action_creation_date < contact_created_date or action_creation_date is null)
+;
+
+--Reactivation request---
+
+
+select distinct profile_id
+
+from sandbox_db.sandbox_all.locked_out_customers
+where reactivation_request_contact = true
+and action_creation_date > contact_created_date
+and active = true;
+
+---
+
+select distinct profile_id
+from sandbox_db.sandbox_all.locked_out_customers
+where reactivation_request_contact = true
+and active = true
+and (action_creation_date < contact_created_date or action_creation_date is null)
+
+;
+
+
+--2FA issues--
+
+
+select distinct profile_id
+
+from sandbox_db.sandbox_all.locked_out_customers
+where twofa_issues_contact = true
+and action_creation_date > contact_created_date
+and active = true;
+
+---
+
+select distinct profile_id
+
+from sandbox_db.sandbox_all.locked_out_customers
+where twofa_issues_contact = true
+and active = true
+and (action_creation_date < contact_created_date or action_creation_date is null)
+;
+
+-----
+
+select count(distinct user_id)
+from sandbox_db.sandbox_all.locked_out_customers
+where action_creation_date > contact_created_date
+and active = true
+and (pnc_contact = true or
+      twofa_issues_contact = true or
+      reactivation_request_contact = true or
+      reset_psswd_contact = true or
+      email_contact = true or
+      pnc_contact = true)
+      ;
+
+select count(distinct user_id)
+from sandbox_db.sandbox_all.locked_out_customers
+where  active = true
+and (pnc_contact = true or
+      twofa_issues_contact = true or
+      reactivation_request_contact = true or
+      reset_psswd_contact = true or
+      email_contact = true or
+      pnc_contact = true)
+and (action_creation_date < contact_created_date or action_creation_date is null)
+;
+
