@@ -1,0 +1,63 @@
+-- 2nd logins---
+
+call sandbox_db.sandbox_all.drop_table ('login_sequence');
+create temporary table if not exists sandbox_db.sandbox_all.login_sequence AS
+
+with login_sequence as (
+    select id,
+           user_id,
+           CREATED_AT,
+           ROW_NUMBER() over (partition by user_id order by CREATED_AT asc) login_number,
+           case when platform in ('ios-app','IOS' ) then 'iOS'
+           when platform in ('ANDROID', 'android-app') then 'Android'
+           when platform in ('WEB', 'desktop') then 'Web'
+           when platform in ('mobile-web','MOBILE_WEB') then 'Mobile web'
+           when platform is null or platform = 'UNKNOWN' then 'Unknown'
+           else null end platform
+
+    from kafka.SECURITY_AUDITLOG_EVENT
+    where EVENT_TYPE = 'LoggedIn'
+    ),
+
+    first_login_platform as (
+      select id,
+             user_id,
+             platform
+
+      from login_sequence
+      where login_number = 1
+      group by 1,2,3
+      ),
+
+     second_login_platform as (
+      select id,
+             user_id,
+             platform
+      from login_sequence
+      where login_number = 2
+      group by 1,2,3
+
+     )
+
+    select login_sequence.CREATED_AT,
+           login_sequence.id,
+           login_sequence.user_id,
+           first_login_platform.platform as first_login_platform,
+           second_login_platform.platform as second_login_platform,
+           concat (first_login_platform, '>', second_login_platform) as login_platform_pair
+
+    from login_sequence
+    join first_login_platform on first_login_platform.USER_ID = login_sequence.USER_ID
+    left join second_login_platform on first_login_platform.USER_ID = second_login_platform.USER_ID
+    where login_sequence.CREATED_AT >dateadd ('day', -180, current_timestamp )
+
+    group by 1,2,3,4,5,6
+;
+
+
+select count (distinct id),
+       login_platform_pair
+
+from sandbox_db.sandbox_all.login_sequence
+group by 2
+;
